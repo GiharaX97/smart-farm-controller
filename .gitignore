@@ -1,0 +1,28 @@
+# ==================== FLUTTER / DART ====================
+# Ignore Flutter build and local config
+flutter_app/build/
+flutter_app/.dart_tool/
+flutter_app/.packages
+flutter_app/.pub-cache/
+flutter_app/.pub/
+flutter_app/build/
+flutter_app/.flutter-plugins
+flutter_app/.flutter-plugins-dependencies
+flutter_app/ios/Pods/
+flutter_app/ios/.symlinks/
+
+# ==================== ARDUINO / ESP-IDE ====================
+# Ignore Arduino build folders (if using PlatformIO or Arduino IDE local folders)
+esp32_firmware/.pio/
+esp32_firmware/build/
+esp8266_firmware/.pio/
+esp8266_firmware/build/
+
+# ==================== GENERAL / OS ====================
+# Mac system files
+.DS_Store
+# Windows system files
+Thumbs.db
+# VS Code / IDE settings (optional, but good practice)
+.vscode/
+.idea/
