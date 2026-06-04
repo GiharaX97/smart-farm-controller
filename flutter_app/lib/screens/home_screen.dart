@@ -32,13 +32,19 @@ class _HomeScreenState extends State<HomeScreen>
   bool isConnected = false;
   bool isPowerOn = false;
 
-  // Door and Scraper now use the new status objects
+  // Device statuses
   DoorStatus _doorStatus = DoorStatus();
   ScraperStatus _scraperStatus = ScraperStatus();
-
+  FeederStatus _feederStatus = FeederStatus();
   Motor3Status _motor3Status = Motor3Status();
   Motor4Status _motor4Status = Motor4Status();
 
+  // Light, E-Stop, Lockout
+  bool _lightOn = false;
+  bool _emergencyStopped = false;
+  String _lockoutState = 'NONE';
+
+  // Counters
   int inCount = 0;
   int outCount = 0;
 
@@ -71,24 +77,26 @@ class _HomeScreenState extends State<HomeScreen>
     await prefs.setString('tab2_name', tab2Name);
   }
 
-  Color _getStatusColor(String status) {
-    if (status.contains("LIMIT") || status.contains("HIT"))
-      return Colors.redAccent;
-    if (status.contains("TIMEOUT")) return Colors.orange;
-    if (status.contains("...") ||
-        status.contains("STARTING") ||
-        status.contains("REVERSING") ||
-        status.contains("OPENING") ||
-        status.contains("CLOSING") ||
-        status.contains("FORWARD") ||
-        status.contains("REVERSE"))
-      return Colors.blue;
-    if (status.contains("READY") ||
-        status.contains("STOPPED") ||
-        status.contains("STOPPING"))
-      return Colors.green;
-    if (status.contains("RUNNING")) return Colors.blue;
-    return Colors.grey;
+  bool get _isDeviceLocked {
+    if (_emergencyStopped) return true;
+    if (_lockoutState == "ALL" || _lockoutState == "ESTOP") return true;
+    if (_lockoutState == "SCHEDULE") return true;
+    return false;
+  }
+
+  bool _isScraperLocked() {
+    if (_emergencyStopped) return true;
+    if (_lockoutState == "SCRAPER_CYCLE") return true;
+    if (_lockoutState == "ALL" || _lockoutState == "ESTOP") return true;
+    return _isDeviceLocked;
+  }
+
+  String get _lockoutReason {
+    if (_emergencyStopped) return "E-STOP ACTIVE";
+    if (_lockoutState == "SCRAPER_CYCLE") return "CYCLE RUNNING";
+    if (_lockoutState == "SCHEDULE") return "SCHEDULE RUNNING";
+    if (_lockoutState == "ALL" || _lockoutState == "ESTOP") return "LOCKED";
+    return "";
   }
 
   Future<void> _initializeMQTT() async {
@@ -115,79 +123,83 @@ class _HomeScreenState extends State<HomeScreen>
       });
     });
 
-    // Listen to door status (new format)
     _mqttService.doorStatusStream.listen((doorStatus) {
       if (!mounted) return;
       setState(() {
         _doorStatus = doorStatus;
-
-        // Update system message
-        if (doorStatus.limitHit != 'NONE') {
-          systemMessage = "⚠️ Door ${doorStatus.limitHit} HIT";
-        } else if (doorStatus.status == 'OPENING') {
-          systemMessage = "Door Opening...";
-        } else if (doorStatus.status == 'CLOSING') {
-          systemMessage = "Door Closing...";
-        } else if (_scraperStatus.limitHit != 'NONE') {
-          systemMessage = "⚠️ Scraper ${_scraperStatus.limitHit} HIT";
-        } else {
-          systemMessage = "System Online";
-        }
+        _updateSystemMessage();
       });
       _addLog("🚪 Door: ${doorStatus.displayText}", LogType.data);
     });
 
-    // Listen to scraper status (new format)
     _mqttService.scraperStatusStream.listen((scraperStatus) {
       if (!mounted) return;
       setState(() {
         _scraperStatus = scraperStatus;
-
-        // Update system message if door not showing limit
-        if (_doorStatus.limitHit == 'NONE') {
-          if (scraperStatus.limitHit != 'NONE') {
-            systemMessage = "⚠️ Scraper ${scraperStatus.limitHit} HIT";
-          } else if (scraperStatus.status == 'FORWARD') {
-            systemMessage = "Scraper Moving Forward...";
-          } else if (scraperStatus.status == 'REVERSE') {
-            systemMessage = "Scraper Moving Reverse...";
-          } else if (_doorStatus.limitHit == 'NONE') {
-            systemMessage = "System Online";
-          }
-        }
+        _updateSystemMessage();
       });
       _addLog("🔄 Scraper: ${scraperStatus.displayText}", LogType.data);
     });
 
-    _mqttService.motor3StatusStream.listen((status) {
+    _mqttService.feederStatusStream.listen((feederStatus) {
       if (!mounted) return;
       setState(() {
-        _motor3Status = status;
+        _feederStatus = feederStatus;
       });
+      _addLog("🍗 Feeder: ${feederStatus.displayText}", LogType.data);
+    });
+
+    _mqttService.lightStatusStream.listen((on) {
+      if (!mounted) return;
+      setState(() => _lightOn = on);
+      _addLog("💡 Light: ${on ? 'ON' : 'OFF'}", LogType.data);
+    });
+
+    _mqttService.estopStream.listen((active) {
+      if (!mounted) return;
+      setState(() {
+        _emergencyStopped = active;
+        if (active) {
+          systemMessage = "🚨 EMERGENCY STOP ACTIVE!";
+          _addLog("🚨 E-Stop TRIGGERED!", LogType.error);
+        } else {
+          _updateSystemMessage();
+          _addLog("✅ E-Stop RESET", LogType.success);
+        }
+      });
+    });
+
+    _mqttService.lockoutStream.listen((state) {
+      if (!mounted) return;
+      setState(() {
+        _lockoutState = state;
+        if (state == "SCRAPER_CYCLE") {
+          _addLog("🔒 Scraper cycle lockout active", LogType.warning);
+        }
+      });
+    });
+
+    _mqttService.motor3StatusStream.listen((status) {
+      if (!mounted) return;
+      setState(() => _motor3Status = status);
       _addLog("🔧 Motor 3: ${status.displayText}", LogType.data);
     });
 
     _mqttService.motor4StatusStream.listen((status) {
       if (!mounted) return;
-      setState(() {
-        _motor4Status = status;
-      });
+      setState(() => _motor4Status = status);
       _addLog("🔧 Motor 4: ${status.displayText}", LogType.data);
     });
 
     _mqttService.inCountStream.listen((count) {
       if (!mounted) return;
-      setState(() {
-        inCount = count;
-      });
+      setState(() => inCount = count);
       _addLog("📥 IN: $count", LogType.data);
     });
 
     _mqttService.outCountStream.listen((count) {
       if (!mounted) return;
-      setState(() {
-        outCount = count;
-      });
+      setState(() => outCount = count);
       _addLog("📤 OUT: $count", LogType.data);
     });
 
@@ -196,11 +208,40 @@ class _HomeScreenState extends State<HomeScreen>
       _addLog(response, LogType.command);
     });
 
+    _mqttService.scheduleLogStream.listen((log) {
+      if (!mounted) return;
+      _addLog("⏰ $log", LogType.info);
+    });
+
     try {
       await _mqttService.connect();
       _addLog("ESP32 Online - Ready", LogType.success);
     } catch (e) {
       _addLog("Failed to connect: $e", LogType.error);
+    }
+  }
+
+  void _updateSystemMessage() {
+    if (_emergencyStopped) {
+      systemMessage = "🚨 EMERGENCY STOP ACTIVE!";
+      return;
+    }
+    if (_doorStatus.limitHit != 'NONE') {
+      systemMessage = "⚠️ Door ${_doorStatus.limitHit} HIT";
+    } else if (_scraperStatus.limitHit != 'NONE') {
+      systemMessage = "⚠️ Scraper ${_scraperStatus.limitHit} HIT";
+    } else if (_doorStatus.status == 'OPENING') {
+      systemMessage = "Door Opening...";
+    } else if (_doorStatus.status == 'CLOSING') {
+      systemMessage = "Door Closing...";
+    } else if (_scraperStatus.status == 'FORWARD') {
+      systemMessage = "Scraper Moving Forward...";
+    } else if (_scraperStatus.status == 'REVERSE') {
+      systemMessage = "Scraper Moving Reverse...";
+    } else if (_lockoutReason.isNotEmpty) {
+      systemMessage = "🔒 $_lockoutReason";
+    } else {
+      systemMessage = "System Online";
     }
   }
 
@@ -244,13 +285,79 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
+  void _handleEStop() {
+    if (_emergencyStopped) {
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A24),
+          title: const Text('Reset E-Stop?',
+              style: TextStyle(color: Colors.white)),
+          content: const Text(
+            'Make sure the physical E-Stop button is RELEASED first.',
+            style: TextStyle(color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('CANCEL', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _mqttService.resetEStop();
+                _addLog("E-Stop reset requested", LogType.command);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+              ),
+              child: const Text('RESET'),
+            ),
+          ],
+        ),
+      );
+    } else {
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A24),
+          title: const Text('⚠️ TRIGGER E-STOP?',
+              style: TextStyle(color: Colors.redAccent)),
+          content: const Text(
+            'This will STOP ALL motors immediately!\nDoor, Scraper, Feeder will all halt.',
+            style: TextStyle(color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('CANCEL', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _mqttService.triggerEStop();
+                _addLog("🚨 E-Stop triggered!", LogType.error);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+              ),
+              child: const Text('TRIGGER'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
   void _sendDoorCommand(String command) {
     if (!isPowerOn || !isConnected) {
       _addLog("Cannot send command - system offline", LogType.error);
       return;
     }
-
-    // Check if command is allowed based on limits
+    if (_isDeviceLocked) {
+      _addLog("Locked: $_lockoutReason", LogType.error);
+      return;
+    }
     if (command == "START" && !_doorStatus.canMoveUp) {
       _addLog("Cannot OPEN - Door already at UP limit", LogType.error);
       return;
@@ -259,7 +366,6 @@ class _HomeScreenState extends State<HomeScreen>
       _addLog("Cannot CLOSE - Door already at DOWN limit", LogType.error);
       return;
     }
-
     _mqttService.sendDoorCommand(command);
     _addLog("Door: $command", LogType.command);
   }
@@ -269,25 +375,62 @@ class _HomeScreenState extends State<HomeScreen>
       _addLog("Cannot send command - system offline", LogType.error);
       return;
     }
-
-    // Check if command is allowed based on limits
+    if (_isScraperLocked()) {
+      String reason = _lockoutState == "SCRAPER_CYCLE"
+          ? "CYCLE RUNNING - Only E-Stop can interrupt"
+          : _lockoutReason;
+      _addLog("Scraper locked: $reason", LogType.error);
+      return;
+    }
+    if (command == "CYCLE") {
+      _mqttService.sendScraperCommand("CYCLE");
+      _addLog("Scraper: CYCLE requested", LogType.command);
+      return;
+    }
     if (command == "START" && !_scraperStatus.canMoveForward) {
-      _addLog(
-        "Cannot move FORWARD - Scraper already at FRONT limit",
-        LogType.error,
-      );
+      _addLog("Cannot move FORWARD - at FRONT limit", LogType.error);
       return;
     }
     if (command == "REVERSE" && !_scraperStatus.canMoveReverse) {
-      _addLog(
-        "Cannot move REVERSE - Scraper already at BACK limit",
-        LogType.error,
-      );
+      _addLog("Cannot move REVERSE - at BACK limit", LogType.error);
       return;
     }
-
     _mqttService.sendScraperCommand(command);
     _addLog("Scraper: $command", LogType.command);
+  }
+
+  void _sendFeederCommand(String command) {
+    if (!isPowerOn || !isConnected) {
+      _addLog("Cannot send command - system offline", LogType.error);
+      return;
+    }
+    if (_isDeviceLocked) {
+      _addLog("Locked: $_lockoutReason", LogType.error);
+      return;
+    }
+    if (command == "START" && !_feederStatus.canMoveOpen) {
+      _addLog("Cannot OPEN - Feeder at OPEN limit", LogType.error);
+      return;
+    }
+    if (command == "REVERSE" && !_feederStatus.canMoveClose) {
+      _addLog("Cannot CLOSE - Feeder at CLOSE limit", LogType.error);
+      return;
+    }
+    _mqttService.sendFeederCommand(command);
+    _addLog("Feeder: $command", LogType.command);
+  }
+
+  void _toggleLight() {
+    if (!isPowerOn || !isConnected) {
+      _addLog("Cannot send command - system offline", LogType.error);
+      return;
+    }
+    if (_emergencyStopped) {
+      _addLog("Cannot control light during E-Stop", LogType.error);
+      return;
+    }
+    _mqttService.sendLightCommand(_lightOn ? "OFF" : "ON");
+    _addLog("Light: ${_lightOn ? 'OFF' : 'ON'}", LogType.command);
   }
 
   void _sendMotor3Command(String command) {
@@ -295,23 +438,18 @@ class _HomeScreenState extends State<HomeScreen>
       _addLog("Cannot send command - system offline", LogType.error);
       return;
     }
-
-    // Check limits
+    if (_isDeviceLocked) {
+      _addLog("Locked: $_lockoutReason", LogType.error);
+      return;
+    }
     if (command == "START" && !_motor3Status.canMoveForward) {
-      _addLog(
-        "Cannot move FORWARD - Motor 3 already at FRONT limit",
-        LogType.error,
-      );
+      _addLog("Motor 3 at FRONT limit", LogType.error);
       return;
     }
     if (command == "REVERSE" && !_motor3Status.canMoveReverse) {
-      _addLog(
-        "Cannot move REVERSE - Motor 3 already at BACK limit",
-        LogType.error,
-      );
+      _addLog("Motor 3 at BACK limit", LogType.error);
       return;
     }
-
     _mqttService.sendMotor3Command(command);
     _addLog("Motor 3: $command", LogType.command);
   }
@@ -321,23 +459,18 @@ class _HomeScreenState extends State<HomeScreen>
       _addLog("Cannot send command - system offline", LogType.error);
       return;
     }
-
-    // Check limits
+    if (_isDeviceLocked) {
+      _addLog("Locked: $_lockoutReason", LogType.error);
+      return;
+    }
     if (command == "START" && !_motor4Status.canMoveForward) {
-      _addLog(
-        "Cannot move FORWARD - Motor 4 already at FRONT limit",
-        LogType.error,
-      );
+      _addLog("Motor 4 at FRONT limit", LogType.error);
       return;
     }
     if (command == "REVERSE" && !_motor4Status.canMoveReverse) {
-      _addLog(
-        "Cannot move REVERSE - Motor 4 already at BACK limit",
-        LogType.error,
-      );
+      _addLog("Motor 4 at BACK limit", LogType.error);
       return;
     }
-
     _mqttService.sendMotor4Command(command);
     _addLog("Motor 4: $command", LogType.command);
   }
@@ -455,6 +588,30 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
+          // E-Stop Button
+          GestureDetector(
+            onTap: _handleEStop,
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _emergencyStopped
+                    ? Colors.redAccent.withOpacity(0.3)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: _emergencyStopped
+                      ? Colors.redAccent
+                      : Colors.grey.withOpacity(0.3),
+                ),
+              ),
+              child: Icon(
+                _emergencyStopped ? Icons.warning : Icons.emergency,
+                color: _emergencyStopped ? Colors.redAccent : Colors.grey,
+                size: 20,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
           _buildPowerButton(),
         ],
       ),
@@ -515,7 +672,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildStatusBar() {
     bool isError =
-        systemMessage.contains("⚠️") || systemMessage.contains("Offline");
+        systemMessage.contains("⚠️") ||
+        systemMessage.contains("Offline") ||
+        systemMessage.contains("🚨");
     Color statusColor = isError ? Colors.red : Colors.green;
 
     return Container(
@@ -624,6 +783,18 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ),
                 const Spacer(),
+                if (_lockoutReason.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: Text(
+                      '🔒 $_lockoutReason',
+                      style: const TextStyle(
+                        color: Colors.orange,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
                 IconButton(
                   icon: const Icon(Icons.delete_outline, size: 14),
                   onPressed: _clearLog,
@@ -766,29 +937,28 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _buildMainCageTab() {
+    bool feederLocked = _isDeviceLocked;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
+          // Chicken count cards
           Row(
             children: [
               _buildCountCard(
-                'IN',
-                inCount,
-                Icons.arrow_downward,
-                const Color(0xFF00B894),
-              ),
+                'IN', inCount, Icons.arrow_downward, const Color(0xFF00B894)),
               const SizedBox(width: 12),
               _buildCountCard(
-                'OUT',
-                outCount,
-                Icons.arrow_upward,
-                const Color(0xFF0984E3),
-              ),
+                'OUT', outCount, Icons.arrow_upward, const Color(0xFF0984E3)),
             ],
           ),
           const SizedBox(height: 16),
-          // DOOR MOTOR - REMOVED isAtLimit
+
+          // Light toggle card
+          _buildLightTile(),
+          const SizedBox(height: 12),
+
+          // DOOR MOTOR
           _buildMotorTile(
             title: "MAIN DOOR",
             status: _doorStatus.displayText,
@@ -796,12 +966,15 @@ class _HomeScreenState extends State<HomeScreen>
             onStart: () => _sendDoorCommand("START"),
             onReverse: () => _sendDoorCommand("REVERSE"),
             onStop: () => _sendDoorCommand("STOP"),
-            isEnabled: isPowerOn && isConnected,
+            isEnabled: isPowerOn && isConnected && !_isDeviceLocked,
+            isLocked: _isDeviceLocked,
+            lockReason: _lockoutReason,
             isAtUpLimit: _doorStatus.limitHit == 'UP LIMIT',
             isAtDownLimit: _doorStatus.limitHit == 'DOWN LIMIT',
           ),
           const SizedBox(height: 12),
-          // SCRAPER MOTOR - REMOVED isAtLimit
+
+          // SCRAPER MOTOR
           _buildMotorTile(
             title: "SCRAPER",
             status: _scraperStatus.displayText,
@@ -809,9 +982,99 @@ class _HomeScreenState extends State<HomeScreen>
             onStart: () => _sendScraperCommand("START"),
             onReverse: () => _sendScraperCommand("REVERSE"),
             onStop: () => _sendScraperCommand("STOP"),
-            isEnabled: isPowerOn && isConnected,
+            extraButton: _buildActionButton(
+              label: "CYCLE",
+              icon: Icons.loop,
+              color: Colors.purple,
+              onPressed: !isPowerOn || !isConnected || _isScraperLocked()
+                  ? null
+                  : () => _sendScraperCommand("CYCLE"),
+            ),
+            isEnabled: isPowerOn && isConnected && !_isScraperLocked(),
+            isLocked: _isScraperLocked(),
+            lockReason: _lockoutState == "SCRAPER_CYCLE"
+                ? "CYCLE RUNNING"
+                : _lockoutReason,
             isAtFrontLimit: _scraperStatus.limitHit == 'FRONT LIMIT',
             isAtBackLimit: _scraperStatus.limitHit == 'BACK LIMIT',
+          ),
+          const SizedBox(height: 12),
+
+          // FEEDER MOTOR
+          _buildMotorTile(
+            title: "FEEDER",
+            status: _feederStatus.displayText,
+            statusColor: _feederStatus.color,
+            onStart: () => _sendFeederCommand("START"),
+            onReverse: () => _sendFeederCommand("REVERSE"),
+            onStop: () => _sendFeederCommand("STOP"),
+            isEnabled: isPowerOn && isConnected && !feederLocked,
+            isLocked: feederLocked,
+            lockReason: _lockoutReason,
+            isAtUpLimit: _feederStatus.limitHit == 'OPEN LIMIT',
+            isAtDownLimit: _feederStatus.limitHit == 'CLOSE LIMIT',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLightTile() {
+    bool disabled = !isPowerOn || !isConnected || _emergencyStopped;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _lightOn
+            ? const Color(0xFF1A1A24)
+            : const Color(0xFF1A1A24),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _lightOn
+              ? const Color(0xFFFDCB6E).withOpacity(0.5)
+              : Colors.grey.withOpacity(0.2),
+        ),
+        boxShadow: _lightOn
+            ? [
+                BoxShadow(
+                  color: const Color(0xFFFDCB6E).withOpacity(0.1),
+                  blurRadius: 12,
+                  spreadRadius: 2,
+                ),
+              ]
+            : null,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            _lightOn ? Icons.lightbulb : Icons.lightbulb_outline,
+            color: _lightOn ? const Color(0xFFFDCB6E) : Colors.grey,
+            size: 28,
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'CAGE LIGHT',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  '12V bulb',
+                  style: TextStyle(fontSize: 10, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: _lightOn,
+            onChanged: disabled ? null : (_) => _toggleLight(),
+            activeColor: const Color(0xFFFDCB6E),
+            activeTrackColor: const Color(0xFFFDCB6E).withOpacity(0.3),
           ),
         ],
       ),
@@ -823,7 +1086,6 @@ class _HomeScreenState extends State<HomeScreen>
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
-          // MOTOR 3
           _buildMotorTile(
             title: "MOTOR 3",
             status: _motor3Status.displayText,
@@ -831,12 +1093,13 @@ class _HomeScreenState extends State<HomeScreen>
             onStart: () => _sendMotor3Command("START"),
             onReverse: () => _sendMotor3Command("REVERSE"),
             onStop: () => _sendMotor3Command("STOP"),
-            isEnabled: isPowerOn && isConnected,
+            isEnabled: isPowerOn && isConnected && !_isDeviceLocked,
+            isLocked: _isDeviceLocked,
+            lockReason: _lockoutReason,
             isAtFrontLimit: _motor3Status.limitHit == 'FRONT LIMIT',
             isAtBackLimit: _motor3Status.limitHit == 'BACK LIMIT',
           ),
           const SizedBox(height: 12),
-          // MOTOR 4
           _buildMotorTile(
             title: "MOTOR 4",
             status: _motor4Status.displayText,
@@ -844,7 +1107,9 @@ class _HomeScreenState extends State<HomeScreen>
             onStart: () => _sendMotor4Command("START"),
             onReverse: () => _sendMotor4Command("REVERSE"),
             onStop: () => _sendMotor4Command("STOP"),
-            isEnabled: isPowerOn && isConnected,
+            isEnabled: isPowerOn && isConnected && !_isDeviceLocked,
+            isLocked: _isDeviceLocked,
+            lockReason: _lockoutReason,
             isAtFrontLimit: _motor4Status.limitHit == 'FRONT LIMIT',
             isAtBackLimit: _motor4Status.limitHit == 'BACK LIMIT',
           ),
@@ -906,65 +1171,52 @@ class _HomeScreenState extends State<HomeScreen>
     required VoidCallback onReverse,
     required VoidCallback onStop,
     required bool isEnabled,
+    bool isLocked = false,
+    String lockReason = '',
     bool isAtUpLimit = false,
     bool isAtDownLimit = false,
     bool isAtFrontLimit = false,
     bool isAtBackLimit = false,
+    Widget? extraButton,
   }) {
     bool startDisabled = !isEnabled;
     bool reverseDisabled = !isEnabled;
 
     // DOOR Logic
     if (title == "MAIN DOOR") {
-      if (isAtUpLimit) {
-        startDisabled = true;
-        reverseDisabled = false;
-      } else if (isAtDownLimit) {
-        startDisabled = false;
-        reverseDisabled = true;
-      } else {
-        startDisabled = !isEnabled;
-        reverseDisabled = !isEnabled;
-      }
+      if (isAtUpLimit) { startDisabled = true; reverseDisabled = false; }
+      else if (isAtDownLimit) { startDisabled = false; reverseDisabled = true; }
+      else { startDisabled = !isEnabled; reverseDisabled = !isEnabled; }
     }
     // SCRAPER Logic
     else if (title == "SCRAPER") {
-      if (isAtFrontLimit) {
-        startDisabled = true;
-        reverseDisabled = false;
-      } else if (isAtBackLimit) {
-        startDisabled = false;
-        reverseDisabled = true;
-      } else {
-        startDisabled = !isEnabled;
-        reverseDisabled = !isEnabled;
-      }
+      if (isAtFrontLimit) { startDisabled = true; reverseDisabled = false; }
+      else if (isAtBackLimit) { startDisabled = false; reverseDisabled = true; }
+      else { startDisabled = !isEnabled; reverseDisabled = !isEnabled; }
     }
-    // MOTOR 3 & MOTOR 4 Logic (same as SCRAPER - FRONT/BACK limits)
+    // FEEDER Logic (OPEN/CLOSE like UP/DOWN)
+    else if (title == "FEEDER") {
+      if (isAtUpLimit) { startDisabled = true; reverseDisabled = false; }
+      else if (isAtDownLimit) { startDisabled = false; reverseDisabled = true; }
+      else { startDisabled = !isEnabled; reverseDisabled = !isEnabled; }
+    }
+    // MOTOR 3 & 4 Logic
     else if (title == "MOTOR 3" || title == "MOTOR 4") {
-      if (isAtFrontLimit) {
-        startDisabled = true; // Can't go forward at FRONT limit
-        reverseDisabled = false; // CAN reverse from FRONT limit
-      } else if (isAtBackLimit) {
-        startDisabled = false; // CAN go forward from BACK limit
-        reverseDisabled = true; // Can't reverse at BACK limit
-      } else {
-        startDisabled = !isEnabled;
-        reverseDisabled = !isEnabled;
-      }
+      if (isAtFrontLimit) { startDisabled = true; reverseDisabled = false; }
+      else if (isAtBackLimit) { startDisabled = false; reverseDisabled = true; }
+      else { startDisabled = !isEnabled; reverseDisabled = !isEnabled; }
     }
-    // Default (no limits)
-    else {
-      startDisabled = !isEnabled;
-      reverseDisabled = !isEnabled;
-    }
+
+    Color borderColor = isLocked
+        ? Colors.redAccent.withOpacity(0.5)
+        : statusColor.withOpacity(0.3);
 
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: const Color(0xFF1A1A24),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: statusColor.withOpacity(0.3), width: 1),
+        border: Border.all(color: borderColor, width: isLocked ? 2 : 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -972,12 +1224,21 @@ class _HomeScreenState extends State<HomeScreen>
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                ),
+              Row(
+                children: [
+                  if (isLocked) ...[
+                    const Icon(Icons.lock, color: Colors.redAccent, size: 14),
+                    const SizedBox(width: 4),
+                  ],
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: isLocked ? Colors.redAccent : Colors.white,
+                    ),
+                  ),
+                ],
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -996,6 +1257,17 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ],
           ),
+          if (lockReason.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '🔒 $lockReason',
+              style: const TextStyle(
+                color: Colors.orange,
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           Row(
             children: [
@@ -1019,6 +1291,10 @@ class _HomeScreenState extends State<HomeScreen>
                 color: Colors.red,
                 onPressed: !isEnabled ? null : onStop,
               ),
+              if (extraButton != null) ...[
+                const SizedBox(width: 8),
+                extraButton,
+              ],
             ],
           ),
         ],

@@ -18,6 +18,10 @@ class HiveMQService {
       StreamController<DoorStatus>.broadcast();
   final StreamController<ScraperStatus> _scraperStatusController =
       StreamController<ScraperStatus>.broadcast();
+  final StreamController<FeederStatus> _feederStatusController =
+      StreamController<FeederStatus>.broadcast();
+  final StreamController<bool> _lightStatusController =
+      StreamController<bool>.broadcast();
   final StreamController<int> _inCountController =
       StreamController<int>.broadcast();
   final StreamController<int> _outCountController =
@@ -30,11 +34,19 @@ class HiveMQService {
       StreamController<Motor3Status>.broadcast();
   final StreamController<Motor4Status> _motor4StatusController =
       StreamController<Motor4Status>.broadcast();
+  final StreamController<bool> _estopController =
+      StreamController<bool>.broadcast();
+  final StreamController<String> _lockoutController =
+      StreamController<String>.broadcast();
+  final StreamController<String> _scheduleLogController =
+      StreamController<String>.broadcast();
 
   // Public streams
   Stream<DoorStatus> get doorStatusStream => _doorStatusController.stream;
   Stream<ScraperStatus> get scraperStatusStream =>
       _scraperStatusController.stream;
+  Stream<FeederStatus> get feederStatusStream => _feederStatusController.stream;
+  Stream<bool> get lightStatusStream => _lightStatusController.stream;
   Stream<int> get inCountStream => _inCountController.stream;
   Stream<int> get outCountStream => _outCountController.stream;
   Stream<String> get connectionStatusStream =>
@@ -42,6 +54,9 @@ class HiveMQService {
   Stream<String> get commandResponseStream => _commandResponseController.stream;
   Stream<Motor3Status> get motor3StatusStream => _motor3StatusController.stream;
   Stream<Motor4Status> get motor4StatusStream => _motor4StatusController.stream;
+  Stream<bool> get estopStream => _estopController.stream;
+  Stream<String> get lockoutStream => _lockoutController.stream;
+  Stream<String> get scheduleLogStream => _scheduleLogController.stream;
 
   bool isConnected = false;
 
@@ -49,12 +64,20 @@ class HiveMQService {
   static const String topicSystemStatus = 'farm/system/status';
   static const String topicDoorCmd = 'farm/door/cmd';
   static const String topicScraperCmd = 'farm/scraper/cmd';
+  static const String topicFeederCmd = 'farm/feeder/cmd';
+  static const String topicFeederStatus = 'farm/feeder/status';
+  static const String topicLightCmd = 'farm/light/cmd';
+  static const String topicLightStatus = 'farm/light/status';
+  static const String topicEStop = 'farm/estop';
+  static const String topicLockout = 'farm/lockout';
   static const String topicInCount = 'farm/chickens/in';
   static const String topicOutCount = 'farm/chickens/out';
   static const String topicMotor3Cmd = 'farm/motor3/cmd';
   static const String topicMotor4Cmd = 'farm/motor4/cmd';
   static const String topicMotor3Status = 'farm/motor3/status';
   static const String topicMotor4Status = 'farm/motor4/status';
+  static const String topicScheduleLog = 'farm/schedule/log';
+  static const String topicScheduleSet = 'farm/schedule/set';
 
   Future<void> connect() async {
     String clientIdentifier =
@@ -119,10 +142,15 @@ class HiveMQService {
   void _subscribeToTopics() {
     const topics = [
       topicSystemStatus,
+      topicFeederStatus,
+      topicLightStatus,
+      topicEStop,
+      topicLockout,
       topicInCount,
       topicOutCount,
       topicMotor3Status,
       topicMotor4Status,
+      topicScheduleLog,
     ];
     for (final topic in topics) {
       client.subscribe(topic, MqttQos.atLeastOnce);
@@ -143,17 +171,23 @@ class HiveMQService {
 
       if (topic == topicSystemStatus) {
         _parseSystemStatus(message);
+      } else if (topic == topicFeederStatus) {
+        _parseFeederStatus(message);
+      } else if (topic == topicLightStatus) {
+        _lightStatusController.add(message == 'ON');
+      } else if (topic == topicEStop) {
+        _estopController.add(message == 'ACTIVE');
+      } else if (topic == topicLockout) {
+        _lockoutController.add(message);
       } else if (topic == topicInCount) {
         try {
-          final count = int.parse(message);
-          _inCountController.add(count);
+          _inCountController.add(int.parse(message));
         } catch (e) {
           print('Error parsing in count: $e');
         }
       } else if (topic == topicOutCount) {
         try {
-          final count = int.parse(message);
-          _outCountController.add(count);
+          _outCountController.add(int.parse(message));
         } catch (e) {
           print('Error parsing out count: $e');
         }
@@ -161,6 +195,8 @@ class HiveMQService {
         _parseMotor3Status(message);
       } else if (topic == topicMotor4Status) {
         _parseMotor4Status(message);
+      } else if (topic == topicScheduleLog) {
+        _scheduleLogController.add(message);
       }
     }
   }
@@ -174,24 +210,18 @@ class HiveMQService {
       ScraperStatus scraperStatus = ScraperStatus();
 
       if (parts.length >= 2) {
-        // Parse door part: "DOOR_LIMIT HIT" or "DOOR_OPENING" or "DOOR_READY"
         final doorPart = parts[0];
         if (doorPart.startsWith('DOOR_')) {
-          String status = doorPart.substring(5); // Remove "DOOR_"
-          doorStatus.status = status;
+          doorStatus.status = doorPart.substring(5);
         }
-        // Parse door limit: "UP LIMIT" or "DOWN LIMIT" or "NONE"
         doorStatus.limitHit = parts[1];
       }
 
       if (parts.length >= 4) {
-        // Parse scraper part: "SCRAPER_READY" or "SCRAPER_LIMIT HIT"
         final scraperPart = parts[2];
         if (scraperPart.startsWith('SCRAPER_')) {
-          String status = scraperPart.substring(8); // Remove "SCRAPER_"
-          scraperStatus.status = status;
+          scraperStatus.status = scraperPart.substring(8);
         }
-        // Parse scraper limit: "FRONT LIMIT" or "BACK LIMIT" or "NONE"
         scraperStatus.limitHit = parts[3];
       }
 
@@ -199,15 +229,26 @@ class HiveMQService {
       _scraperStatusController.add(scraperStatus);
     } catch (e) {
       print('Error parsing system status: $e');
-      // Fallback: send default values
-      DoorStatus doorStatus = DoorStatus();
-      ScraperStatus scraperStatus = ScraperStatus();
-      doorStatus.status = 'READY';
-      doorStatus.limitHit = 'NONE';
-      scraperStatus.status = 'READY';
-      scraperStatus.limitHit = 'NONE';
-      _doorStatusController.add(doorStatus);
-      _scraperStatusController.add(scraperStatus);
+      _doorStatusController.add(DoorStatus());
+      _scraperStatusController.add(ScraperStatus());
+    }
+  }
+
+  void _parseFeederStatus(String message) {
+    try {
+      final parts = message.split('|');
+      FeederStatus status = FeederStatus();
+
+      if (parts.length >= 2) {
+        status.status = parts[0];
+        status.limitHit = parts[1];
+      } else {
+        status.status = message;
+      }
+      _feederStatusController.add(status);
+    } catch (e) {
+      print('Error parsing feeder status: $e');
+      _feederStatusController.add(FeederStatus());
     }
   }
 
@@ -215,22 +256,17 @@ class HiveMQService {
     try {
       final parts = message.split('|');
       Motor3Status motor3Status = Motor3Status();
-
       if (parts.length >= 2) {
         final motorPart = parts[0];
         if (motorPart.startsWith('MOTOR3_')) {
-          String status = motorPart.substring(7);
-          motor3Status.status = status;
+          motor3Status.status = motorPart.substring(7);
         }
         motor3Status.limitHit = parts[1];
       }
       _motor3StatusController.add(motor3Status);
     } catch (e) {
       print('Error parsing motor3 status: $e');
-      Motor3Status motor3Status = Motor3Status();
-      motor3Status.status = message;
-      motor3Status.limitHit = 'NONE';
-      _motor3StatusController.add(motor3Status);
+      _motor3StatusController.add(Motor3Status());
     }
   }
 
@@ -238,22 +274,17 @@ class HiveMQService {
     try {
       final parts = message.split('|');
       Motor4Status motor4Status = Motor4Status();
-
       if (parts.length >= 2) {
         final motorPart = parts[0];
         if (motorPart.startsWith('MOTOR4_')) {
-          String status = motorPart.substring(7);
-          motor4Status.status = status;
+          motor4Status.status = motorPart.substring(7);
         }
         motor4Status.limitHit = parts[1];
       }
       _motor4StatusController.add(motor4Status);
     } catch (e) {
       print('Error parsing motor4 status: $e');
-      Motor4Status motor4Status = Motor4Status();
-      motor4Status.status = message;
-      motor4Status.limitHit = 'NONE';
-      _motor4StatusController.add(motor4Status);
+      _motor4StatusController.add(Motor4Status());
     }
   }
 
@@ -280,12 +311,37 @@ class HiveMQService {
     await sendCommand(topicScraperCmd, command);
   }
 
+  Future<void> sendFeederCommand(String command) async {
+    await sendCommand(topicFeederCmd, command);
+  }
+
+  Future<void> sendLightCommand(String command) async {
+    await sendCommand(topicLightCmd, command);
+  }
+
+  Future<void> triggerEStop() async {
+    await sendCommand(topicEStop, 'TRIGGER');
+    _estopController.add(true);
+  }
+
+  Future<void> resetEStop() async {
+    await sendCommand(topicEStop, 'RESET');
+  }
+
   Future<void> sendMotor3Command(String command) async {
     await sendCommand(topicMotor3Cmd, command);
   }
 
   Future<void> sendMotor4Command(String command) async {
     await sendCommand(topicMotor4Cmd, command);
+  }
+
+  void sendSchedule(String jsonPayload) {
+    if (!isConnected) return;
+    final builder = MqttClientPayloadBuilder();
+    builder.addString(jsonPayload);
+    client.publishMessage(topicScheduleSet, MqttQos.atLeastOnce, builder.payload!);
+    print('📤 Schedule sent');
   }
 
   void disconnect() {
@@ -299,12 +355,17 @@ class HiveMQService {
     disconnect();
     _doorStatusController.close();
     _scraperStatusController.close();
+    _feederStatusController.close();
+    _lightStatusController.close();
     _inCountController.close();
     _outCountController.close();
     _connectionStatusController.close();
     _commandResponseController.close();
     _motor3StatusController.close();
     _motor4StatusController.close();
+    _estopController.close();
+    _lockoutController.close();
+    _scheduleLogController.close();
   }
 }
 
@@ -314,9 +375,7 @@ class DoorStatus {
   String limitHit = 'NONE';
 
   String get displayText {
-    if (limitHit != 'NONE') {
-      return '$limitHit HIT';
-    }
+    if (limitHit != 'NONE') return '$limitHit HIT';
     if (status == 'OPENING') return 'OPENING';
     if (status == 'CLOSING') return 'CLOSING';
     if (status == 'LIMIT HIT') return 'LIMIT HIT';
@@ -326,18 +385,12 @@ class DoorStatus {
   Color get color {
     if (limitHit != 'NONE') return Colors.redAccent;
     if (status == 'OPENING' || status == 'CLOSING') return Colors.blue;
-    if (status == 'READY') return Colors.green;
     if (status == 'LIMIT HIT') return Colors.redAccent;
-    return Colors.grey;
+    return Colors.green;
   }
 
-  bool get canMoveUp {
-    return limitHit != 'UP LIMIT';
-  }
-
-  bool get canMoveDown {
-    return limitHit != 'DOWN LIMIT';
-  }
+  bool get canMoveUp => limitHit != 'UP LIMIT';
+  bool get canMoveDown => limitHit != 'DOWN LIMIT';
 }
 
 class ScraperStatus {
@@ -345,9 +398,7 @@ class ScraperStatus {
   String limitHit = 'NONE';
 
   String get displayText {
-    if (limitHit != 'NONE') {
-      return '$limitHit HIT';
-    }
+    if (limitHit != 'NONE') return '$limitHit HIT';
     if (status == 'FORWARD') return 'FORWARD';
     if (status == 'REVERSE') return 'REVERSE';
     if (status == 'LIMIT HIT') return 'LIMIT HIT';
@@ -357,29 +408,43 @@ class ScraperStatus {
   Color get color {
     if (limitHit != 'NONE') return Colors.redAccent;
     if (status == 'FORWARD' || status == 'REVERSE') return Colors.blue;
-    if (status == 'READY') return Colors.green;
     if (status == 'LIMIT HIT') return Colors.redAccent;
-    return Colors.grey;
+    return Colors.green;
   }
 
-  bool get canMoveForward {
-    return limitHit != 'FRONT LIMIT';
-  }
-
-  bool get canMoveReverse {
-    return limitHit != 'BACK LIMIT';
-  }
+  bool get canMoveForward => limitHit != 'FRONT LIMIT';
+  bool get canMoveReverse => limitHit != 'BACK LIMIT';
 }
 
-// Add these after ScraperStatus class
+class FeederStatus {
+  String status = 'READY';
+  String limitHit = 'NONE';
+
+  String get displayText {
+    if (limitHit != 'NONE') return '$limitHit HIT';
+    if (status == 'OPENING') return 'OPENING';
+    if (status == 'CLOSING') return 'CLOSING';
+    if (status == 'LIMIT HIT') return 'LIMIT HIT';
+    return 'READY';
+  }
+
+  Color get color {
+    if (limitHit != 'NONE') return Colors.redAccent;
+    if (status == 'OPENING' || status == 'CLOSING') return Colors.blue;
+    if (status == 'LIMIT HIT') return Colors.redAccent;
+    return Colors.green;
+  }
+
+  bool get canMoveOpen => limitHit != 'OPEN LIMIT';
+  bool get canMoveClose => limitHit != 'CLOSE LIMIT';
+}
+
 class Motor3Status {
   String status = 'READY';
   String limitHit = 'NONE';
 
   String get displayText {
-    if (limitHit != 'NONE') {
-      return '$limitHit HIT';
-    }
+    if (limitHit != 'NONE') return '$limitHit HIT';
     if (status == 'RUNNING') return 'RUNNING';
     if (status == 'REVERSING') return 'REVERSING';
     if (status == 'STOPPED') return 'STOPPED';
@@ -394,13 +459,8 @@ class Motor3Status {
     return Colors.grey;
   }
 
-  bool get canMoveForward {
-    return limitHit != 'FRONT LIMIT';
-  }
-
-  bool get canMoveReverse {
-    return limitHit != 'BACK LIMIT';
-  }
+  bool get canMoveForward => limitHit != 'FRONT LIMIT';
+  bool get canMoveReverse => limitHit != 'BACK LIMIT';
 }
 
 class Motor4Status {
@@ -408,9 +468,7 @@ class Motor4Status {
   String limitHit = 'NONE';
 
   String get displayText {
-    if (limitHit != 'NONE') {
-      return '$limitHit HIT';
-    }
+    if (limitHit != 'NONE') return '$limitHit HIT';
     if (status == 'RUNNING') return 'RUNNING';
     if (status == 'REVERSING') return 'REVERSING';
     if (status == 'STOPPED') return 'STOPPED';
@@ -425,11 +483,6 @@ class Motor4Status {
     return Colors.grey;
   }
 
-  bool get canMoveForward {
-    return limitHit != 'FRONT LIMIT';
-  }
-
-  bool get canMoveReverse {
-    return limitHit != 'BACK LIMIT';
-  }
+  bool get canMoveForward => limitHit != 'FRONT LIMIT';
+  bool get canMoveReverse => limitHit != 'BACK LIMIT';
 }
